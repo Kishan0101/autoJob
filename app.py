@@ -9,14 +9,14 @@ from urllib.parse import urlparse
 from io import BytesIO
 from PIL import Image
 import pickle
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import json
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import logging
-import base64
 
 # ----- CONFIG -----
 SCOPES = ['https://www.googleapis.com/auth/blogger']
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # List of companies (focusing on Workday-based sites; extend for others)
 COMPANIES = [
@@ -189,14 +190,13 @@ def fetch_past_jobs(company_name, base_url, target_date_str):
                         has_more = False
                     continue
                 
-                # Fetch description from detail endpoint
                 detail_endpoint = f"https://{host}/wday/cxs/{tenant}/{site}/job{external_path}"
                 try:
                     detail_r = requests.get(detail_endpoint, headers=headers, timeout=10)
                     if detail_r.status_code == 200:
                         detail_data = detail_r.json()
                         original_desc = detail_data.get('jobPostingInfo', {}).get('jobDescription', title + ' - ' + location + '. Exciting opportunity at ' + company_name + ' in India.')
-                        description = re.sub(r'<[^>]+>', '', original_desc)  # Strip HTML for extraction
+                        description = re.sub(r'<[^>]+>', '', original_desc)
                         skills = re.findall(r'\b(?:[A-Za-z0-9+.#]+(?:/[A-Za-z0-9+.#]+)?|[A-Za-z]+)\b(?=\s*(?:,|\.|;|\sand\s|\sor\s|\(|\)))', description, re.I)
                         skills = list(set([skill for skill in skills if len(skill) > 2 and not re.match(r'^\d+$', skill)]))[:5]
                         experience_match = re.search(r'(\d+\s*-\s*\d+\s*(?:year[s]?)?(?:\s*of\s*experience)?|\d+\s*\+\s*(?:year[s]?)?(?:\s*of\s*experience)?)', description, re.I)
@@ -241,7 +241,7 @@ def fetch_past_jobs(company_name, base_url, target_date_str):
 
 def generate_post_title(job):
     """Generate post title based on experience level."""
-    base_title = re.sub(r'\s+-\s+.*', '', job['title']).strip()  # Clean base title
+    base_title = re.sub(r'\s+-\s+.*', '', job['title']).strip()
     exp_str = job['exp']
     if exp_str == 'fresher':
         return f"{base_title} - fresher"
@@ -263,30 +263,32 @@ def simple_article_from_job(job, logo_url=None):
     return content_html
 
 def authenticate_blogger(creds_json=None):
-    """Authenticate with Blogger API using OAuth."""
+    """Authenticate with Blogger API using credentials from frontend."""
     creds = None
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, 'rb') as tk:
             creds = pickle.load(tk)
+    
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
+        elif creds_json:
+            creds = Credentials(
+                token=creds_json.get('access_token'),
+                refresh_token=creds_json.get('refresh_token'),
+                token_uri='https://oauth2.googleapis.com/token',
+                client_id=os.environ.get('CLIENT_ID'),
+                client_secret=os.environ.get('CLIENT_SECRET'),
+                scopes=SCOPES
+            )
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
         else:
-            if creds_json:
-                with open('temp_credentials.json', 'w') as f:
-                    json.dump(creds_json, f)
-                flow = InstalledAppFlow.from_client_secrets_file('temp_credentials.json', SCOPES)
-                creds = flow.run_local_server(port=0)
-                os.remove('temp_credentials.json')
-            else:
-                creds_json = json.loads(os.environ.get('CREDENTIALS_JSON', '{}'))
-                with open('temp_credentials.json', 'w') as f:
-                    json.dump(creds_json, f)
-                flow = InstalledAppFlow.from_client_secrets_file('temp_credentials.json', SCOPES)
-                creds = flow.run_local_server(port=0)
-                os.remove('temp_credentials.json')
+            raise ValueError("No valid credentials provided and no stored token available.")
+        
         with open(TOKEN_FILE, 'wb') as tk:
             pickle.dump(creds, tk)
+    
     service = build('blogger', 'v3', credentials=creds)
     return service
 
